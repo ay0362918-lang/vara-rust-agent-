@@ -1,5 +1,6 @@
 use anyhow::Result;
 use gclient::{GearApi, WSAddress};
+use gclient::gear::runtime_types::pallet_gear_voucher::internal::VoucherId;
 use gear_core::ids::ProgramId;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -66,12 +67,6 @@ async fn get_voucher(client: &Client) -> Result<String> {
 }
 
 fn build_approve_payload(amount: u128) -> Vec<u8> {
-    // SCALE encode: BetToken::Approve(spender: ActorId, value: U256)
-    // Service: "BetToken" = [0x42,0x65,0x74,0x54,0x6f,0x6b,0x65,0x6e]
-    // Method:  "Approve"  = [0x41,0x70,0x70,0x72,0x6f,0x76,0x65]
-    // Spender: BET_LANE as [u8;32]
-    // Value:   amount as U256 little-endian 32 bytes
-
     let service = b"BetToken";
     let method = b"Approve";
     let spender = hex::decode(BET_LANE).unwrap();
@@ -129,7 +124,6 @@ async fn main() -> Result<()> {
     println!("🚀 LOOP STARTED");
 
     loop {
-        // Refresh voucher every 50 txs
         if counter > 0 && counter % 50 == 0 {
             match get_voucher(&http_client).await {
                 Ok(v) => voucher_id = v,
@@ -137,24 +131,27 @@ async fn main() -> Result<()> {
             }
         }
 
-        // Randomize amount slightly for unique payload
-        let amount = 20_000_000_000_000u128 + (counter % 99999);
+        // FIX 1: cast counter to u128
+        let amount = 20_000_000_000_000u128 + (counter % 99999) as u128;
         let payload = build_approve_payload(amount);
 
-        // Parse voucher id
+        // FIX 2: wrap voucher in VoucherId type
         let voucher_bytes = hex::decode(
             voucher_id.trim_start_matches("0x")
         )?;
         let mut voucher_arr = [0u8; 32];
         voucher_arr.copy_from_slice(&voucher_bytes);
+        let voucher = VoucherId(voucher_arr);
 
+        // FIX 3: add missing keep_alive bool argument
         match api
             .send_message_with_voucher(
-                voucher_arr,
+                voucher,
                 bet_token,
                 payload,
                 25_000_000_000,
                 0,
+                false,
             )
             .await
         {
