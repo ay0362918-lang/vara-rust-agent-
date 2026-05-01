@@ -1,5 +1,5 @@
 use anyhow::Result;
-use gclient::{GearApi, WSAddress};
+use gclient::GearApi;
 use gclient::gear::runtime_types::pallet_gear_voucher::internal::VoucherId;
 use gprimitives::ActorId;
 use reqwest::Client;
@@ -99,10 +99,9 @@ async fn main() -> Result<()> {
 
     // FIX 1: .build() takes no arguments — endpoint set via env or default
     let api = GearApi::builder()
-        .suri(&mnemonic)
-        .endpoint(RPC)
-        .build()
-        .await?;
+    .suri(&mnemonic)
+    .build_to(RPC)
+    .await?;
 
     println!("✅ Connected");
 
