@@ -1,10 +1,9 @@
 use anyhow::Result;
 use gclient::{GearApi, WSAddress};
 use gclient::gear::runtime_types::pallet_gear_voucher::internal::VoucherId;
-use gear_core::ids::ProgramId;
+use gprimitives::ActorId;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use tokio::time::{sleep, Duration};
 
 const RPC: &str = "wss://rpc.vara.network";
@@ -71,27 +70,17 @@ fn build_approve_payload(amount: u128) -> Vec<u8> {
     let method = b"Approve";
     let spender = hex::decode(BET_LANE).unwrap();
 
-    // U256 little-endian 32 bytes
     let mut value = [0u8; 32];
     let amount_bytes = amount.to_le_bytes();
     value[..16].copy_from_slice(&amount_bytes);
 
     let mut payload = Vec::new();
-
-    // SCALE compact length prefix for service name
     payload.push((service.len() as u8) << 2);
     payload.extend_from_slice(service);
-
-    // SCALE compact length prefix for method name
     payload.push((method.len() as u8) << 2);
     payload.extend_from_slice(method);
-
-    // Spender ActorId (32 bytes)
     payload.extend_from_slice(&spender);
-
-    // Value U256 (32 bytes LE)
     payload.extend_from_slice(&value);
-
     payload
 }
 
@@ -107,9 +96,12 @@ async fn main() -> Result<()> {
     let http_client = Client::new();
 
     println!("🔌 Connecting to Vara...");
+
+    // FIX 1: .build() takes no arguments — endpoint set via env or default
     let api = GearApi::builder()
         .suri(&mnemonic)
-        .build(WSAddress::new(RPC, None))
+        .endpoint(RPC)
+        .build()
         .await?;
 
     println!("✅ Connected");
@@ -117,7 +109,13 @@ async fn main() -> Result<()> {
     let mut voucher_id = get_voucher(&http_client).await?;
     println!("🎫 Voucher: {}", voucher_id);
 
-    let bet_token = ProgramId::from_str(BET_TOKEN)?;
+    // FIX 2: Use ActorId from gprimitives instead of ProgramId
+    let bet_token: ActorId = hex::decode(BET_TOKEN)
+        .unwrap()
+        .as_slice()
+        .try_into()
+        .unwrap();
+
     let mut counter: u64 = 0;
     let mut errors: u32 = 0;
 
@@ -131,11 +129,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        // FIX 1: cast counter to u128
         let amount = 20_000_000_000_000u128 + (counter % 99999) as u128;
         let payload = build_approve_payload(amount);
 
-        // FIX 2: wrap voucher in VoucherId type
         let voucher_bytes = hex::decode(
             voucher_id.trim_start_matches("0x")
         )?;
@@ -143,7 +139,6 @@ async fn main() -> Result<()> {
         voucher_arr.copy_from_slice(&voucher_bytes);
         let voucher = VoucherId(voucher_arr);
 
-        // FIX 3: add missing keep_alive bool argument
         match api
             .send_message_with_voucher(
                 voucher,
