@@ -97,12 +97,13 @@ async fn main() -> Result<()> {
 
     println!("🔌 Connecting to Vara...");
 
-    // FIX 1: .build() takes no arguments — endpoint set via env or default
-    let api = GearApi::builder()
-    .suri(&mnemonic)
-    .build_to(RPC)
-    .await?;
+// ADD THIS LINE before builder:
+    std::env::set_var("GEAR_NODE_URL", RPC);
 
+    let api = GearApi::builder()
+        .suri(&mnemonic)
+        .build()
+        .await?;
     println!("✅ Connected");
 
     let mut voucher_id = get_voucher(&http_client).await?;
