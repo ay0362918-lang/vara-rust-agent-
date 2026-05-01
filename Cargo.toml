@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gclient = "1.10.0"
-gear-core = "1.10.0"
+gprimitives = "1.10.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 reqwest = { version = "0.11", features = ["json"] }
