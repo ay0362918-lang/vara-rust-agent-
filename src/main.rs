@@ -121,52 +121,37 @@ async fn main() -> Result<()> {
 
     println!("🚀 LOOP STARTED");
 
-    loop {
-        if counter > 0 && counter % 50 == 0 {
-            match get_voucher(&http_client).await {
-                Ok(v) => voucher_id = v,
-                Err(e) => eprintln!("⚠️ Voucher refresh error: {}", e),
-            }
+loop {
+    if counter > 0 && counter % 50 == 0 {
+        match get_voucher(&http_client).await {
+            Ok(v) => voucher_id = v,
+            Err(e) => eprintln!("⚠️ Voucher refresh error: {}", e),
         }
+    }
 
-        let amount = 20_000_000_000_000u128 + (counter % 99999) as u128;
-        let payload = build_approve_payload(amount);
+    let amount = 20_000_000_000_000u128 + (counter % 99999) as u128;
+    let payload = build_approve_payload(amount);
 
-        let voucher_bytes = hex::decode(
-            voucher_id.trim_start_matches("0x")
-        )?;
-        let mut voucher_arr = [0u8; 32];
-        voucher_arr.copy_from_slice(&voucher_bytes);
-        let voucher = VoucherId(voucher_arr);
+    let voucher_bytes = hex::decode(voucher_id.trim_start_matches("0x"))?;
+    let mut voucher_arr = [0u8; 32];
+    voucher_arr.copy_from_slice(&voucher_bytes);
+    let voucher = VoucherId(voucher_arr);
 
-        match api
-            .send_message_with_voucher(
-                voucher,
-                bet_token,
-                payload,
-                25_000_000_000,
-                0,
-                false,
-            )
+    // Don't await — fire and forget, move immediately to next tx
+    let api_clone = api.clone();
+    tokio::spawn(async move {
+        match api_clone
+            .send_message_with_voucher(voucher, bet_token, payload, 25_000_000_000, 0, false)
             .await
         {
-            Ok((_message_id, _block_hash)) => {
-                counter += 1;
-                errors = 0;
-                println!("[✅] #{}", counter);
-            }
-            Err(e) => {
-                errors += 1;
-                eprintln!("[❌] {}", e);
-                if errors >= 5 {
-                    sleep(Duration::from_secs(2)).await;
-                    errors = 0;
-                    match get_voucher(&http_client).await {
-                        Ok(v) => voucher_id = v,
-                        Err(e) => eprintln!("⚠️ {}", e),
-                    }
-                }
-            }
+            Ok(_) => println!("[✅] #{}", counter + 1),
+            Err(e) => eprintln!("[❌] {}", e),
         }
+    });
+
+    counter += 1;
+    // Small delay to avoid nonce collision — one per block (~3 seconds)
+    sleep(Duration::from_millis(3000)).await;
+}
     }
 }
