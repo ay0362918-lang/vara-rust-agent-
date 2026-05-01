@@ -1,0 +1,19 @@
+[package]
+name = "hy4-spammer"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "hy4-spammer"
+path = "src/main.rs"
+
+[dependencies]
+gclient = "1.4.0"
+gear-core = "1.4.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+dotenv = "0.15"
