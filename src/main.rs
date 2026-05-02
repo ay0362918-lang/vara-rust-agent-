@@ -4,6 +4,8 @@ use gclient::gear::runtime_types::pallet_gear_voucher::internal::VoucherId;
 use gprimitives::ActorId;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::Duration;
 
 const RPC: &str = "wss://rpc.vara.network";
@@ -12,6 +14,10 @@ const BET_TOKEN: &str = "186f6cda18fea13d9fc5969eec5a379220d6726f64c1d5f4b346e89
 const BET_LANE: &str = "35848dea0ab64f283497deaff93b12fe4d17649624b2cd5149f253ef372b29dc";
 const HEX_ADDRESS: &str = "0x2a3d796f3e8401782789ebf3f92d12c8d9f0addb39643dbea01b96d230207a3f";
 const VOUCHER_URL: &str = "https://voucher-backend-production-5a1b.up.railway.app/voucher";
+
+// How many concurrent txs to fire at once
+// Start at 3 — increase if no nonce errors
+const CONCURRENCY: u64 = 3;
 
 #[derive(Deserialize, Debug)]
 struct VoucherResponse {
@@ -91,7 +97,7 @@ async fn main() -> Result<()> {
     let mnemonic = std::env::var("PRIVATE_KEY")
         .expect("PRIVATE_KEY not set");
 
-    println!("⚡ HY4 RUST SPAMMER - MAXIMUM SPEED");
+    println!("⚡ HY4 RUST SPAMMER - CONCURRENT MODE");
 
     let http_client = Client::new();
 
@@ -114,48 +120,63 @@ async fn main() -> Result<()> {
         .try_into()
         .unwrap();
 
-    let mut counter: u64 = 0;
-    let mut errors: u32 = 0;
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut loop_count: u64 = 0;
 
-    println!("🚀 LOOP STARTED");
+    println!("🚀 LOOP STARTED - concurrency={}", CONCURRENCY);
 
     loop {
-        if counter > 0 && counter % 50 == 0 {
+        loop_count += 1;
+
+        // Refresh voucher every 50 loop iterations
+        if loop_count % 50 == 0 {
             match get_voucher(&http_client).await {
                 Ok(v) => voucher_id = v,
-                Err(e) => eprintln!("⚠️ Voucher refresh error: {}", e),
+                Err(e) => eprintln!("⚠️ Voucher error: {}", e),
             }
         }
-
-        let amount = 20_000_000_000_000u128 + (counter % 99999) as u128;
-        let payload = build_approve_payload(amount);
 
         let voucher_bytes = hex::decode(voucher_id.trim_start_matches("0x"))?;
         let mut voucher_arr = [0u8; 32];
         voucher_arr.copy_from_slice(&voucher_bytes);
         let voucher = VoucherId(voucher_arr);
 
-        match api
-            .send_message_with_voucher(voucher, bet_token, payload, 25_000_000_000, 0, false)
-            .await
-        {
-            Ok((_message_id, _block_hash)) => {
-                counter += 1;
-                errors = 0;
-                println!("[✅] #{}", counter);
-            }
-            Err(e) => {
-                errors += 1;
-                eprintln!("[❌] {}", e);
-                if errors >= 5 {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    errors = 0;
-                    match get_voucher(&http_client).await {
-                        Ok(v) => voucher_id = v,
-                        Err(e) => eprintln!("⚠️ {}", e),
+        // Spawn CONCURRENCY tasks simultaneously
+        let mut handles = Vec::new();
+        for i in 0..CONCURRENCY {
+            let api_clone = api.clone();
+            let counter_clone = counter.clone();
+            let amount = 20_000_000_000_000u128 + (loop_count * CONCURRENCY + i) % 99999;
+            let payload = build_approve_payload(amount);
+            let voucher_clone = VoucherId(voucher_arr);
+
+            let handle = tokio::spawn(async move {
+                match api_clone
+                    .send_message_with_voucher(
+                        voucher_clone,
+                        bet_token,
+                        payload,
+                        25_000_000_000,
+                        0,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let n = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        println!("[✅] #{}", n);
+                    }
+                    Err(e) => {
+                        eprintln!("[❌] {}", e);
                     }
                 }
-            }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all concurrent tasks to finish before next batch
+        for h in handles {
+            let _ = h.await;
         }
     }
 }
