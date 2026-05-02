@@ -6,7 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::Duration;
+
 
 const RPC: &str = "wss://rpc.vara.network";
 const BASKET_MARKET: &str = "e5dd153b813c768b109094a9e2eb496c38216b1dbe868391f1d20ac927b7d2c2";
@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
         for i in 0..CONCURRENCY {
             let api_clone = api.clone();
             let counter_clone = counter.clone();
-            let amount = 20_000_000_000_000u128 + (loop_count * CONCURRENCY + i) % 99999;
+            let amount = 20_000_000_000_000u128 + ((loop_count * CONCURRENCY + i) % 99999) as u128;
             let payload = build_approve_payload(amount);
             let voucher_clone = VoucherId(voucher_arr);
 
