@@ -8,12 +8,13 @@ name = "hy4-spammer"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+dotenv = "0.15"
 gclient = "1.10.0"
 gprimitives = "1.10.0"
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
+hex = "0.4"
+parity-scale-codec = { version = "3", features = ["derive"] }
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-hex = "0.4"
-dotenv = "0.15"
+tokio = { version = "1", features = ["full"] }
