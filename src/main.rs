@@ -158,14 +158,16 @@ async fn main() -> Result<()> {
         let amount = 20_000_000_000_000u128 + (loop_count % 99999) as u128;
         let payload = build_approve_payload(amount);
 
-        // Clone the Arc to pass the Mutex reference into the spawned task
-        let api_clone = Arc::clone(&api);
+        // Acquire an owned lock in the main loop. This naturally throttles the loop
+        // to the network's block inclusion speed (~12s per tx), preventing infinite
+        // memory growth in the Tokio task queue while guaranteeing safe nonce increments.
+        let api_lock = Arc::clone(&api).lock_owned().await;
+        
         let bet_token_clone = bet_token;
         let counter_clone = Arc::clone(&counter);
         let task_id = loop_count;
 
         tokio::spawn(async move {
-            let api_lock = api_clone.lock().await;
             match api_lock
                 .send_message_with_voucher(
                     VoucherId(voucher_arr),
