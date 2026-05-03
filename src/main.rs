@@ -7,7 +7,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 const RPC: &str = "wss://rpc.vara.network";
@@ -16,11 +15,6 @@ const BET_TOKEN: &str = "186f6cda18fea13d9fc5969eec5a379220d6726f64c1d5f4b346e89
 const BET_LANE: &str = "35848dea0ab64f283497deaff93b12fe4d17649624b2cd5149f253ef372b29dc";
 const HEX_ADDRESS: &str = "0x2a3d796f3e8401782789ebf3f92d12c8d9f0addb39643dbea01b96d230207a3f";
 const VOUCHER_URL: &str = "https://voucher-backend-production-5a1b.up.railway.app/voucher";
-
-// Number of concurrent workers — tune this up/down
-// 5 workers = ~5x throughput vs sequential
-// Too high (>10) risks nonce collisions on the node side
-const NUM_WORKERS: u64 = 5;
 
 // ✅ Wrap raw bytes to bypass SCALE Vec<u8> double-encoding
 struct RawBytes(Vec<u8>);
@@ -98,108 +92,27 @@ fn build_approve_payload(amount: u128) -> Vec<u8> {
     payload
 }
 
-/// Parse a hex voucher string into a [u8; 32] array
-fn parse_voucher(voucher_id: &str) -> Result<[u8; 32]> {
-    let bytes = hex::decode(voucher_id.trim_start_matches("0x"))?;
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(arr)
-}
-
-/// A single worker loop. Each worker has its OWN cloned GearApi instance
-/// so it manages its own nonce sequence independently.
-async fn worker_loop(
-    worker_id: u64,
-    api: GearApi,                          // cloned — owns its own nonce counter
-    bet_token: ActorId,
-    voucher_id: Arc<RwLock<String>>,       // shared, refreshed by main task
-    counter: Arc<AtomicU64>,
-    http_client: Client,
-) {
-    let mut local_loop: u64 = 0;
-
-    loop {
-        local_loop += 1;
-
-        // Each worker refreshes voucher independently every 50 of its own iterations
-        if local_loop % 50 == 0 {
-            match get_voucher(&http_client).await {
-                Ok(v) => {
-                    let mut w = voucher_id.write().await;
-                    *w = v.clone();
-                    println!("[W{}] 🔄 Voucher refreshed: {}", worker_id, v);
-                }
-                Err(e) => eprintln!("[W{}] ⚠️ Voucher refresh error: {}", worker_id, e),
-            }
-        }
-
-        // Read current voucher ID
-        let vid = {
-            let r = voucher_id.read().await;
-            r.clone()
-        };
-
-        let voucher_arr = match parse_voucher(&vid) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("[W{}] ⚠️ Bad voucher hex: {}", worker_id, e);
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-        };
-
-        // Unique amount per worker + iteration to avoid duplicate-TX detection
-        let amount = 20_000_000_000_000u128
-            + (worker_id * 100_000 + local_loop % 99_999) as u128;
-        let payload = build_approve_payload(amount);
-
-        match api
-            .send_message_with_voucher(
-                VoucherId(voucher_arr),
-                bet_token,
-                RawBytes(payload),
-                25_000_000_000,
-                0,
-                false,
-            )
-            .await
-        {
-            Ok(_) => {
-                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                println!("[W{}][✅] Global #{}", worker_id, n);
-            }
-            Err(e) => {
-                eprintln!("[W{}][❌] {}", worker_id, e);
-                // Back off on error — 1010 = bad payload, 1014 = nonce issue
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
 
     let mnemonic = std::env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set");
 
-    println!("⚡ HY4 RUST SPAMMER - {} CONCURRENT WORKERS", NUM_WORKERS);
+    println!("⚡ HY4 RUST SPAMMER - STAGGERED FIRE-AND-FORGET");
     println!("🔌 Connecting to Vara...");
 
     let http_client = Client::new();
 
-    // Build the FIRST api instance, then clone it per worker
-    // GearApi::clone() gives each worker its own nonce sequence
-    let base_api = GearApi::builder()
+    let api = GearApi::builder()
         .suri(&mnemonic)
         .uri(RPC)
         .build()
         .await?;
 
-    println!("✅ Connected | account: {:?}", base_api.account_id());
+    println!("✅ Connected | account: {:?}", api.account_id());
 
-    let initial_voucher = get_voucher(&http_client).await?;
-    println!("🎫 Voucher: {}", initial_voucher);
+    let mut voucher_id = get_voucher(&http_client).await?;
+    println!("🎫 Voucher: {}", voucher_id);
 
     let bet_token: ActorId = hex::decode(BET_TOKEN)
         .unwrap()
@@ -207,42 +120,74 @@ async fn main() -> Result<()> {
         .try_into()
         .unwrap();
 
-    // Shared mutable voucher ID — workers can all read/refresh it
-    let voucher_id = Arc::new(RwLock::new(initial_voucher));
     let counter = Arc::new(AtomicU64::new(0));
+    let mut loop_count: u64 = 0;
 
-    println!("🚀 SPAWNING {} CONCURRENT WORKERS", NUM_WORKERS);
+    println!("🚀 LOOP STARTED - 500ms staggered fire-and-forget");
 
-    let mut handles = Vec::new();
+    loop {
+        loop_count += 1;
 
-    for worker_id in 0..NUM_WORKERS {
-        // ✅ CRITICAL: clone api BEFORE spawning — each clone owns its own nonce
-        let api_clone = base_api.clone();
+        // Refresh voucher every 50 loops
+        if loop_count % 50 == 0 {
+            match get_voucher(&http_client).await {
+                Ok(v) => {
+                    println!("🔄 Voucher refreshed: {}", v);
+                    voucher_id = v;
+                }
+                Err(e) => eprintln!("⚠️ Voucher refresh error: {}", e),
+            }
+        }
+
+        let voucher_bytes = match hex::decode(voucher_id.trim_start_matches("0x")) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("⚠️ Bad voucher hex: {}", e);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let mut voucher_arr = [0u8; 32];
+        voucher_arr.copy_from_slice(&voucher_bytes);
+
+        // Unique amount per loop
+        let amount = 20_000_000_000_000u128 + (loop_count % 99999) as u128;
+        let payload = build_approve_payload(amount);
+
+        // Clone for the spawned task
+        let api_clone = api.clone();
         let bet_token_clone = bet_token;
-        let voucher_clone = Arc::clone(&voucher_id);
         let counter_clone = Arc::clone(&counter);
-        let client_clone = http_client.clone();
+        let task_id = loop_count;
 
-        let handle = tokio::spawn(async move {
-            worker_loop(
-                worker_id,
-                api_clone,
-                bet_token_clone,
-                voucher_clone,
-                counter_clone,
-                client_clone,
-            )
-            .await;
+        tokio::spawn(async move {
+            match api_clone
+                .send_message_with_voucher(
+                    VoucherId(voucher_arr),
+                    bet_token_clone,
+                    RawBytes(payload),
+                    25_000_000_000,
+                    0,
+                    false,
+                )
+                .await
+            {
+                Ok(_) => {
+                    let n = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                    println!("[✅] Global #{} (Task {})", n, task_id);
+                }
+                Err(e) => {
+                    eprintln!("[❌] Task {}: {}", task_id, e);
+                }
+            }
         });
 
-        handles.push(handle);
-        println!("[W{}] 🟢 Worker started", worker_id);
+        // 🕒 THE MAGIC FIX: Stagger submissions by 500ms!
+        // This gives the node's tx pool enough time to receive the TX and update the
+        // `account_next_index` (pending nonce). When the next loop iteration calls
+        // `send_message_with_voucher`, it will fetch the correctly incremented nonce,
+        // completely eliminating 1014 (Priority too low) collisions while still
+        // allowing tasks to await block inclusion in the background!
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-
-    // Wait for all workers (they loop forever, so this blocks indefinitely)
-    for h in handles {
-        let _ = h.await;
-    }
-
-    Ok(())
 }
