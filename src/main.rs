@@ -103,13 +103,17 @@ async fn main() -> Result<()> {
 
     let http_client = Client::new();
 
-    let api = GearApi::builder()
-        .suri(&mnemonic)
-        .uri(RPC)
-        .build()
-        .await?;
+    let api = Arc::new(tokio::sync::Mutex::new(
+        GearApi::builder()
+            .suri(&mnemonic)
+            .uri(RPC)
+            .build()
+            .await?
+    ));
 
-    println!("✅ Connected | account: {:?}", api.account_id());
+    // Access the inner account ID before entering the loop
+    let account_id = api.lock().await.account_id().clone();
+    println!("✅ Connected | account: {:?}", account_id);
 
     let mut voucher_id = get_voucher(&http_client).await?;
     println!("🎫 Voucher: {}", voucher_id);
@@ -154,14 +158,15 @@ async fn main() -> Result<()> {
         let amount = 20_000_000_000_000u128 + (loop_count % 99999) as u128;
         let payload = build_approve_payload(amount);
 
-        // Clone for the spawned task
-        let api_clone = api.clone();
+        // Clone the Arc to pass the Mutex reference into the spawned task
+        let api_clone = Arc::clone(&api);
         let bet_token_clone = bet_token;
         let counter_clone = Arc::clone(&counter);
         let task_id = loop_count;
 
         tokio::spawn(async move {
-            match api_clone
+            let api_lock = api_clone.lock().await;
+            match api_lock
                 .send_message_with_voucher(
                     VoucherId(voucher_arr),
                     bet_token_clone,
@@ -182,12 +187,10 @@ async fn main() -> Result<()> {
             }
         });
 
-        // 🕒 THE MAGIC FIX: Stagger submissions by 500ms!
+        // 🕒 THE MAGIC FIX: Stagger submissions by 750ms!
         // This gives the node's tx pool enough time to receive the TX and update the
-        // `account_next_index` (pending nonce). When the next loop iteration calls
-        // `send_message_with_voucher`, it will fetch the correctly incremented nonce,
-        // completely eliminating 1014 (Priority too low) collisions while still
-        // allowing tasks to await block inclusion in the background!
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // `account_next_index` (pending nonce). The Mutex lock ensures we don't accidentally
+        // reset the internally tracked nonce via `api.clone()`.
+        tokio::time::sleep(Duration::from_millis(750)).await;
     }
 }
